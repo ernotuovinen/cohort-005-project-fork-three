@@ -9,7 +9,7 @@ A learner paying for one course. One purchase gives one learner access to one co
 _Avoid_: Order, transaction, sale
 
 **Enrollment**:
-The record that grants a learner access to a course's content. It is created by a purchase or by claiming a team seat, and it is independent of any refund request.
+The record that grants a learner access to a course's content. It is created by a purchase or by claiming a team seat, and it ends when a refund for that purchase is approved. A later purchase creates a new enrollment.
 _Avoid_: Access record, subscription
 
 **Team Seat**:
