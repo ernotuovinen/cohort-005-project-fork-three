@@ -1,4 +1,5 @@
-import { and, eq, inArray, isNotNull, isNull, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, isNotNull, isNull, sql } from "drizzle-orm";
+import { alias } from "drizzle-orm/sqlite-core";
 import { db } from "~/db";
 import {
   coupons,
@@ -351,6 +352,37 @@ export function getOpenRefundRequests() {
     .innerJoin(courses, eq(purchases.courseId, courses.id))
     .where(eq(refunds.status, RefundStatus.Open))
     .orderBy(refunds.requestedAt)
+    .all();
+}
+
+/**
+ * Every decided Refund Request, Approved or Declined, newest Decision first,
+ * with the Admin who made the Decision. Read-only: a Decision is final.
+ */
+export function getDecidedRefundRequests() {
+  // The users table is joined twice: once for the learner, once for the Admin.
+  const decidingAdmins = alias(users, "deciding_admins");
+
+  return db
+    .select({
+      id: refunds.id,
+      status: refunds.status,
+      decidedAt: refunds.decidedAt,
+      declineReason: refunds.declineReason,
+      learnerName: users.name,
+      courseTitle: courses.title,
+      amountPaid: purchases.amountPaid,
+      decidedByName: decidingAdmins.name,
+    })
+    .from(refunds)
+    .innerJoin(purchases, eq(refunds.purchaseId, purchases.id))
+    .innerJoin(users, eq(purchases.userId, users.id))
+    .innerJoin(courses, eq(purchases.courseId, courses.id))
+    .leftJoin(decidingAdmins, eq(refunds.decidedByUserId, decidingAdmins.id))
+    .where(
+      inArray(refunds.status, [RefundStatus.Approved, RefundStatus.Declined])
+    )
+    .orderBy(desc(refunds.decidedAt))
     .all();
 }
 

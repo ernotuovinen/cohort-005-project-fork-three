@@ -9,16 +9,22 @@ import {
 import { toast } from "sonner";
 import { z } from "zod";
 import { eq } from "drizzle-orm";
-import { AlertTriangle, CheckCircle2, ReceiptText } from "lucide-react";
+import {
+  AlertTriangle,
+  CheckCircle2,
+  History,
+  ReceiptText,
+} from "lucide-react";
 import type { Route } from "./+types/admin.refund-requests";
 import { db } from "~/db";
-import { UserRole, users } from "~/db/schema";
+import { RefundStatus, UserRole, users } from "~/db/schema";
 import { getCurrentUserId } from "~/lib/session";
 import { parseFormData } from "~/lib/validation";
-import { formatPrice } from "~/lib/utils";
+import { cn, formatPrice } from "~/lib/utils";
 import {
   applyRefundDecision,
   DECLINE_REASON_MAX_LENGTH,
+  getDecidedRefundRequests,
   getOpenRefundRequests,
   type Decision,
 } from "~/lib/refunds.server";
@@ -63,7 +69,10 @@ async function requireAdmin(request: Request, signedOutMessage: string) {
 export function meta() {
   return [
     { title: "Refund Requests — Cadence" },
-    { name: "description", content: "Decide Open Refund Requests" },
+    {
+      name: "description",
+      content: "Decide Open Refund Requests and see every Decision made",
+    },
   ];
 }
 
@@ -75,6 +84,8 @@ export async function loader({ request }: Route.LoaderArgs) {
 
   return {
     openRequests: getOpenRefundRequests(),
+    // Revalidated after every Decision, so a decided row shows up here at once.
+    decidedRequests: getDecidedRefundRequests(),
     declineReasonMaxLength: DECLINE_REASON_MAX_LENGTH,
   };
 }
@@ -147,7 +158,7 @@ export function shouldRevalidate({
   return defaultShouldRevalidate;
 }
 
-function formatRaisedDate(iso: string) {
+function formatDay(iso: string) {
   return new Date(iso).toLocaleDateString("en-US", {
     year: "numeric",
     month: "short",
@@ -208,7 +219,7 @@ function OpenRefundRequestRow({
         {refundRequest.reason}
       </td>
       <td className="whitespace-nowrap px-4 py-3 text-sm text-muted-foreground">
-        {formatRaisedDate(refundRequest.requestedAt)}
+        {formatDay(refundRequest.requestedAt)}
       </td>
       <td className="px-4 py-3">
         {isDeclining ? (
@@ -306,13 +317,67 @@ function OpenRefundRequestRow({
   );
 }
 
+function DecisionBadge({ status }: { status: RefundStatus }) {
+  const approved = status === RefundStatus.Approved;
+  return (
+    <span
+      className={cn(
+        "inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium",
+        approved
+          ? "bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-400"
+          : "bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-400"
+      )}
+    >
+      {approved ? "Approved" : "Declined"}
+    </span>
+  );
+}
+
+function DecidedRefundRequestRow({
+  refundRequest,
+}: {
+  refundRequest: {
+    status: RefundStatus;
+    decidedAt: string | null;
+    decidedByName: string | null;
+    declineReason: string | null;
+    learnerName: string;
+    courseTitle: string;
+    amountPaid: number;
+  };
+}) {
+  return (
+    <tr className="border-b border-border align-top last:border-0">
+      <td className="px-4 py-3">
+        <DecisionBadge status={refundRequest.status} />
+      </td>
+      <td className="px-4 py-3 text-sm">
+        {refundRequest.decidedByName ?? "Unknown Admin"}
+      </td>
+      <td className="whitespace-nowrap px-4 py-3 text-sm text-muted-foreground">
+        {refundRequest.decidedAt ? formatDay(refundRequest.decidedAt) : "—"}
+      </td>
+      <td className="px-4 py-3 text-sm font-medium">
+        {refundRequest.learnerName}
+      </td>
+      <td className="px-4 py-3 text-sm">{refundRequest.courseTitle}</td>
+      <td className="px-4 py-3 text-sm tabular-nums">
+        {formatPrice(refundRequest.amountPaid)}
+      </td>
+      <td className="max-w-md px-4 py-3 text-sm text-muted-foreground">
+        {refundRequest.declineReason ?? ""}
+      </td>
+    </tr>
+  );
+}
+
 const headerCell =
   "px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-muted-foreground";
 
 export default function AdminRefundRequests({
   loaderData,
 }: Route.ComponentProps) {
-  const { openRequests, declineReasonMaxLength } = loaderData;
+  const { openRequests, decidedRequests, declineReasonMaxLength } = loaderData;
 
   return (
     <div className="mx-auto max-w-7xl p-6 lg:p-8">
@@ -378,6 +443,55 @@ export default function AdminRefundRequests({
           </CardContent>
         </Card>
       )}
+
+      <section className="mt-12" aria-labelledby="decided-refund-requests">
+        <h2 id="decided-refund-requests" className="text-xl font-semibold">
+          Decided Refund Requests
+        </h2>
+        <p className="mt-1 mb-4 text-sm text-muted-foreground">
+          Every Decision an Admin has made, newest first. A Decision is final.
+        </p>
+
+        {decidedRequests.length === 0 ? (
+          <Card>
+            <CardContent className="py-8 text-center">
+              <History className="mx-auto mb-3 size-8 text-muted-foreground/50" />
+              <p className="font-medium">No Decided Refund Requests yet.</p>
+              <p className="mt-1 text-sm text-muted-foreground">
+                Refund Requests an Admin has Approved or Declined show up here.
+              </p>
+            </CardContent>
+          </Card>
+        ) : (
+          <Card>
+            <CardContent className="p-0">
+              <div className="overflow-x-auto">
+                <table className="w-full">
+                  <thead>
+                    <tr className="border-b border-border bg-muted/50">
+                      <th className={headerCell}>Decision</th>
+                      <th className={headerCell}>Decided by</th>
+                      <th className={headerCell}>Decided</th>
+                      <th className={headerCell}>Learner</th>
+                      <th className={headerCell}>Course</th>
+                      <th className={headerCell}>Amount paid</th>
+                      <th className={headerCell}>Reason for the Decline</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {decidedRequests.map((refundRequest) => (
+                      <DecidedRefundRequestRow
+                        key={refundRequest.id}
+                        refundRequest={refundRequest}
+                      />
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </CardContent>
+          </Card>
+        )}
+      </section>
     </div>
   );
 }
