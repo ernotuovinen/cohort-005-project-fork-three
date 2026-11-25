@@ -8,6 +8,7 @@ import { fileURLToPath } from "url";
 import * as schema from "../app/db/schema";
 import {
   UserRole,
+  RefundStatus,
   CourseStatus,
   LessonProgressStatus,
   QuestionType,
@@ -2266,13 +2267,31 @@ This course is still in draft while the cluster examples are rewritten against t
     })
     .run();
 
-  db.insert(schema.purchases)
+  const [sophiaPurchase] = db
+    .insert(schema.purchases)
     .values({
       userId: students[4].id, // Sophia — bought course 1 individually
       courseId: course1.id,
       amountPaid: 7900,
       country: "US",
       createdAt: daysAgo(15),
+    })
+    .returning()
+    .all();
+
+  // Sophia asked for a refund three days ago and the Admin declined it. A
+  // Declined Refund Request leaves her Enrollment alone, so she still has
+  // access and may raise a new Refund Request.
+  db.insert(schema.refunds)
+    .values({
+      purchaseId: sophiaPurchase.id,
+      status: RefundStatus.Declined,
+      reason: "I thought this course covered React with TypeScript.",
+      requestedAt: daysAgo(3),
+      decidedAt: daysAgo(2),
+      decidedByUserId: admin.id,
+      declineReason:
+        "The course page lists the topics, and React is not one of them. Lesson 5 links to a free React guide.",
     })
     .run();
 
@@ -2724,12 +2743,12 @@ This course is still in draft while the cluster examples are rewritten against t
   );
 
   // ─── Liam's Purchase ───
-  // One learner part-way through a recent purchase, with no request raised, so
-  // the course page offers "Request a refund". The dates count back from
-  // today, so the fourteen-day refund window is still open whenever you seed.
+  // One learner part-way through a recent purchase, with an Open Refund
+  // Request waiting on an Admin's Decision. The dates count back from today,
+  // so the request always falls inside the fourteen-day refund window.
 
   const liam = studentByEmail("liam@example.com");
-  db
+  const [liamPurchase] = db
     .insert(schema.purchases)
     .values({
       userId: liam.id,
@@ -2737,6 +2756,15 @@ This course is still in draft while the cluster examples are rewritten against t
       amountPaid: 7900,
       country: null,
       createdAt: daysAgo(9),
+    })
+    .returning()
+    .all();
+  db.insert(schema.refunds)
+    .values({
+      purchaseId: liamPurchase.id,
+      status: RefundStatus.Open,
+      reason: "The pace is too fast for me. I need a more basic course first.",
+      requestedAt: daysAgo(1),
     })
     .run();
   db.insert(schema.enrollments)
@@ -2822,6 +2850,9 @@ This course is still in draft while the cluster examples are rewritten against t
   );
   console.log(
     `  Purchases: ${countRows(schema.purchases)} (${countRows(schema.purchases, gte(schema.purchases.createdAt, sevenDaysAgo))} in the last 7 days), spanning ${historyDays} days`
+  );
+  console.log(
+    `  Refund Requests: ${countRows(schema.refunds)} (${countRows(schema.refunds, eq(schema.refunds.status, RefundStatus.Open))} open)`
   );
   console.log(
     `  Teams: ${countRows(schema.teams)}, coupons: ${countRows(schema.coupons)} (${countRows(schema.coupons, isNotNull(schema.coupons.redeemedByUserId))} redeemed)`

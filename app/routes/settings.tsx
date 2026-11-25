@@ -55,7 +55,7 @@ export async function loader({ request }: Route.LoaderArgs) {
     throw data("User not found.", { status: 404 });
   }
 
-  const pendingRefundRequests = db
+  const openRefundRequests = db
     .select({
       id: refunds.id,
       courseTitle: courses.title,
@@ -70,7 +70,7 @@ export async function loader({ request }: Route.LoaderArgs) {
     .where(
       and(
         eq(purchases.userId, currentUserId),
-        eq(refunds.status, RefundStatus.Requested)
+        eq(refunds.status, RefundStatus.Open)
       )
     )
     .all();
@@ -83,7 +83,7 @@ export async function loader({ request }: Route.LoaderArgs) {
       bio: currentUser.bio,
       role: currentUser.role,
     },
-    pendingRefundRequests,
+    openRefundRequests,
   };
 }
 
@@ -122,7 +122,7 @@ export async function action({ request }: Route.ActionArgs) {
 }
 
 export default function Settings({ loaderData }: Route.ComponentProps) {
-  const { user, pendingRefundRequests } = loaderData;
+  const { user, openRefundRequests } = loaderData;
   const fetcher = useFetcher();
   const nameInputRef = useRef<HTMLInputElement>(null);
 
@@ -209,18 +209,18 @@ export default function Settings({ loaderData }: Route.ComponentProps) {
         </CardContent>
       </Card>
 
-      {pendingRefundRequests.length > 0 && (
+      {openRefundRequests.length > 0 && (
         <Card className="mt-8 max-w-md">
           <CardHeader>
             <h2 className="text-lg font-semibold">Refund requests</h2>
             <p className="text-sm text-muted-foreground">
-              {pendingRefundRequests.length === 1
-                ? "One refund request is waiting on us."
-                : `${pendingRefundRequests.length} refund requests are waiting on us.`}
+              {openRefundRequests.length === 1
+                ? "One refund request is open, waiting on an Admin's decision."
+                : `${openRefundRequests.length} refund requests are open, waiting on an Admin's decision.`}
             </p>
           </CardHeader>
           <CardContent className="space-y-4">
-            {pendingRefundRequests.map((refundRequest) => (
+            {openRefundRequests.map((refundRequest) => (
               <div key={refundRequest.id} className="rounded-md border p-3">
                 <div className="flex items-start justify-between gap-3">
                   <Link
@@ -230,11 +230,11 @@ export default function Settings({ loaderData }: Route.ComponentProps) {
                     {refundRequest.courseTitle}
                   </Link>
                   <span className="shrink-0 rounded-full bg-amber-100 px-2.5 py-0.5 text-xs font-medium text-amber-800 dark:bg-amber-900/30 dark:text-amber-300">
-                    Pending
+                    Open
                   </span>
                 </div>
                 <p className="mt-1 text-sm text-muted-foreground">
-                  {formatPrice(refundRequest.amountPaid)} · requested{" "}
+                  {formatPrice(refundRequest.amountPaid)} · raised{" "}
                   {new Date(refundRequest.requestedAt).toLocaleDateString()}
                 </p>
                 <p className="mt-2 text-sm">{refundRequest.reason}</p>

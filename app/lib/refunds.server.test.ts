@@ -44,7 +44,7 @@ describe("evaluateRefundEligibility", () => {
     });
   });
 
-  it("refuses when a refund request is already pending", () => {
+  it("refuses when a refund request is already open", () => {
     expect(
       evaluateRefundEligibility(facts({ hasOpenRequest: true }))
     ).toEqual({ eligible: false, reason: "request-already-open" });

@@ -161,7 +161,7 @@ export function getLatestPurchase(userId: number, courseId: number) {
     .get();
 }
 
-/** The Pending refund request on a purchase, if there is one. */
+/** The Open Refund Request on a purchase, if there is one. */
 export function getOpenRefundRequest(purchaseId: number) {
   return db
     .select()
@@ -169,7 +169,7 @@ export function getOpenRefundRequest(purchaseId: number) {
     .where(
       and(
         eq(refunds.purchaseId, purchaseId),
-        eq(refunds.status, RefundStatus.Requested)
+        eq(refunds.status, RefundStatus.Open)
       )
     )
     .get();

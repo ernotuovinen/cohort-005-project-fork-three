@@ -32,7 +32,7 @@ export enum QuestionType {
 }
 
 export enum RefundStatus {
-  Requested = "requested",
+  Open = "open",
   Approved = "approved",
   Declined = "declined",
 }
@@ -132,6 +132,9 @@ export const enrollments = sqliteTable(
       .notNull()
       .$defaultFn(() => new Date().toISOString()),
     completedAt: text("completed_at"),
+    // Set when an Admin approves the Refund Request on this purchase. An
+    // Ended Enrollment grants no access and is never reopened.
+    endedAt: text("ended_at"),
   },
   (table) => [index("enrollments_course_idx").on(table.courseId)]
 );
@@ -239,7 +242,7 @@ export const refunds = sqliteTable(
     status: text("status")
       .notNull()
       .$type<RefundStatus>()
-      .default(RefundStatus.Requested),
+      .default(RefundStatus.Open),
     // The learner's own words, in the box on the course page.
     reason: text("reason").notNull(),
     // Null until someone approves — a declined request refunds nothing.
@@ -247,8 +250,10 @@ export const refunds = sqliteTable(
     requestedAt: text("requested_at")
       .notNull()
       .$defaultFn(() => new Date().toISOString()),
-    resolvedAt: text("resolved_at"),
-    resolvedByUserId: integer("resolved_by_user_id").references(() => users.id),
+    decidedAt: text("decided_at"),
+    decidedByUserId: integer("decided_by_user_id").references(() => users.id),
+    // The Admin's words to the learner. Set only on a Declined Refund Request.
+    declineReason: text("decline_reason"),
   },
   (table) => [index("refunds_purchase_idx").on(table.purchaseId)]
 );
