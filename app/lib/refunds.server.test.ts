@@ -1,5 +1,7 @@
 import { describe, it, expect } from "vitest";
+import { RefundStatus } from "~/db/schema";
 import {
+  decideRefundRequest,
   evaluateRefundEligibility,
   lastDayOfRefundWindow,
   REFUND_WATCH_LIMIT_SECONDS,
@@ -18,6 +20,7 @@ function facts(overrides: Partial<RefundFacts> = {}): RefundFacts {
     },
     coursePrice: 7900,
     hasOpenRequest: false,
+    hasApprovedRequest: false,
     isClaimedTeamSeat: false,
     lessonCount: 10,
     completedLessonCount: 0,
@@ -44,10 +47,16 @@ describe("evaluateRefundEligibility", () => {
     });
   });
 
-  it("refuses when a refund request is already pending", () => {
+  it("refuses when a refund request is already open", () => {
     expect(
       evaluateRefundEligibility(facts({ hasOpenRequest: true }))
     ).toEqual({ eligible: false, reason: "request-already-open" });
+  });
+
+  it("refuses when the purchase was already refunded", () => {
+    expect(
+      evaluateRefundEligibility(facts({ hasApprovedRequest: true }))
+    ).toEqual({ eligible: false, reason: "already-refunded" });
   });
 
   it("refuses a claimed team seat", () => {
@@ -114,5 +123,113 @@ describe("lastDayOfRefundWindow", () => {
     expect(lastDayOfRefundWindow(purchasedAt.toISOString())).toBe(
       "2026-01-24"
     );
+  });
+});
+
+describe("decideRefundRequest", () => {
+  const now = new Date(2026, 0, 15, 9, 30);
+  const approveByAdmin = { outcome: "approve", decidedByUserId: 7 } as const;
+
+  it("approves an Open Refund Request, recording who decided and when", () => {
+    expect(
+      decideRefundRequest({ status: RefundStatus.Open }, approveByAdmin, now)
+    ).toEqual({
+      ok: true,
+      fields: {
+        status: RefundStatus.Approved,
+        decidedAt: now.toISOString(),
+        decidedByUserId: 7,
+        declineReason: null,
+      },
+    });
+  });
+
+  it("declines an Open Refund Request, keeping the Admin's reason", () => {
+    expect(
+      decideRefundRequest(
+        { status: RefundStatus.Open },
+        { outcome: "decline", decidedByUserId: 7, reason: "Most of the course was watched." },
+        now
+      )
+    ).toEqual({
+      ok: true,
+      fields: {
+        status: RefundStatus.Declined,
+        decidedAt: now.toISOString(),
+        decidedByUserId: 7,
+        declineReason: "Most of the course was watched.",
+      },
+    });
+  });
+
+  it.each(["", "   ", "\n\t "])(
+    "refuses a Decline whose reason is blank (%j)",
+    (reason) => {
+      expect(
+        decideRefundRequest(
+          { status: RefundStatus.Open },
+          { outcome: "decline", decidedByUserId: 7, reason },
+          now
+        )
+      ).toEqual({ ok: false, reason: "decline-reason-missing" });
+    }
+  );
+
+  it("refuses a Decline whose reason is 501 characters", () => {
+    expect(
+      decideRefundRequest(
+        { status: RefundStatus.Open },
+        { outcome: "decline", decidedByUserId: 7, reason: "a".repeat(501) },
+        now
+      )
+    ).toEqual({ ok: false, reason: "decline-reason-too-long" });
+  });
+
+  it("accepts a Decline whose reason is exactly 500 characters", () => {
+    const result = decideRefundRequest(
+      { status: RefundStatus.Open },
+      { outcome: "decline", decidedByUserId: 7, reason: "a".repeat(500) },
+      now
+    );
+    expect(result).toMatchObject({
+      ok: true,
+      fields: { status: RefundStatus.Declined, declineReason: "a".repeat(500) },
+    });
+  });
+
+  it("trims the reason before the length check and keeps the trimmed reason", () => {
+    const result = decideRefundRequest(
+      { status: RefundStatus.Open },
+      {
+        outcome: "decline",
+        decidedByUserId: 7,
+        reason: `   ${"a".repeat(500)}  \n`,
+      },
+      now
+    );
+    expect(result).toMatchObject({
+      ok: true,
+      fields: { status: RefundStatus.Declined, declineReason: "a".repeat(500) },
+    });
+  });
+
+  it.each([RefundStatus.Approved, RefundStatus.Declined])(
+    "refuses a Decision on a Refund Request already %s",
+    (status) => {
+      expect(decideRefundRequest({ status }, approveByAdmin, now)).toEqual({
+        ok: false,
+        reason: "already-decided",
+      });
+    }
+  );
+
+  it("refuses a Decline on a decided Refund Request as already decided, before checking its reason", () => {
+    expect(
+      decideRefundRequest(
+        { status: RefundStatus.Declined },
+        { outcome: "decline", decidedByUserId: 7, reason: "  " },
+        now
+      )
+    ).toEqual({ ok: false, reason: "already-decided" });
   });
 });

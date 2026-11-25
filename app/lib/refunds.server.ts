@@ -1,17 +1,23 @@
-import { and, eq, inArray, isNotNull, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, isNotNull, sql } from "drizzle-orm";
+import { alias } from "drizzle-orm/sqlite-core";
 import { db } from "~/db";
 import {
   coupons,
+  courses,
+  enrollments,
   lessonProgress,
   lessons,
   modules,
   purchases,
   refunds,
+  users,
   videoWatchEvents,
   LessonProgressStatus,
   RefundStatus,
 } from "~/db/schema";
 import { getDiscountForCountry } from "~/lib/ppp";
+import { enrolledIn } from "~/lib/access.server";
+import { formatPrice } from "~/lib/utils";
 
 // The rules for a Refund Request (see GLOSSARY.md). Both the course page, which
 // decides whether to offer a refund, and the refund action, which accepts the
@@ -29,6 +35,7 @@ export const REFUND_COMPLETION_LIMIT = 0.5;
 export type RefundIneligibilityReason =
   | "no-purchase"
   | "request-already-open"
+  | "already-refunded"
   | "claimed-team-seat"
   | "window-closed"
   | "too-much-completed"
@@ -56,6 +63,8 @@ export type RefundFacts = {
     | undefined;
   coursePrice: number;
   hasOpenRequest: boolean;
+  /** The purchase already has an Approved Refund Request. */
+  hasApprovedRequest: boolean;
   isClaimedTeamSeat: boolean;
   lessonCount: number;
   completedLessonCount: number;
@@ -87,6 +96,11 @@ export function evaluateRefundEligibility(facts: RefundFacts): RefundEligibility
   if (!purchase) return { eligible: false, reason: "no-purchase" };
   if (facts.hasOpenRequest) {
     return { eligible: false, reason: "request-already-open" };
+  }
+  // A Declined Refund Request lets the learner ask again; an Approved one
+  // does not, because the purchase is already refunded (see GLOSSARY.md).
+  if (facts.hasApprovedRequest) {
+    return { eligible: false, reason: "already-refunded" };
   }
 
   // A seat that came out of a team licence, and has been claimed, belongs to
@@ -127,6 +141,255 @@ export function evaluateRefundEligibility(facts: RefundFacts): RefundEligibility
 }
 
 /**
+ * An Admin's Decision on an Open Refund Request (see GLOSSARY.md). Each
+ * outcome is its own variant, so a Decline carrying its reason can sit next
+ * to Approve without changing it.
+ */
+export type Decision =
+  | { outcome: "approve"; decidedByUserId: number }
+  | { outcome: "decline"; decidedByUserId: number; reason: string };
+
+/** The longest decline reason an Admin may give, in characters after trimming. */
+export const DECLINE_REASON_MAX_LENGTH = 500;
+
+export type DecisionRefusalReason =
+  | "already-decided"
+  | "decline-reason-missing"
+  | "decline-reason-too-long";
+
+/** What a Decision writes onto the Refund Request. */
+export type DecisionFields = {
+  status: RefundStatus;
+  decidedAt: string;
+  decidedByUserId: number;
+  declineReason: string | null;
+};
+
+export type DecisionResult =
+  | { ok: true; fields: DecisionFields }
+  | { ok: false; reason: DecisionRefusalReason };
+
+/**
+ * Applies a Decision to a Refund Request's current state. Pure: it receives
+ * the clock, and returns the fields to write or why the Decision is refused.
+ * Eligibility is not judged again here; it belongs to the moment the learner
+ * asked (docs/adr/0002).
+ */
+export function decideRefundRequest(
+  request: { status: RefundStatus },
+  decision: Decision,
+  now: Date
+): DecisionResult {
+  // A Decision is final: only an Open Refund Request can be decided.
+  if (request.status !== RefundStatus.Open) {
+    return { ok: false, reason: "already-decided" };
+  }
+
+  const decidedAt = now.toISOString();
+
+  if (decision.outcome === "decline") {
+    const reason = decision.reason.trim();
+
+    // A learner never receives a bare refusal.
+    if (reason === "") {
+      return { ok: false, reason: "decline-reason-missing" };
+    }
+    if (reason.length > DECLINE_REASON_MAX_LENGTH) {
+      return { ok: false, reason: "decline-reason-too-long" };
+    }
+
+    return {
+      ok: true,
+      fields: {
+        status: RefundStatus.Declined,
+        decidedAt,
+        decidedByUserId: decision.decidedByUserId,
+        declineReason: reason,
+      },
+    };
+  }
+
+  return {
+    ok: true,
+    fields: {
+      status: RefundStatus.Approved,
+      decidedAt,
+      decidedByUserId: decision.decidedByUserId,
+      declineReason: null,
+    },
+  };
+}
+
+/**
+ * Records an Admin's Decision on a Refund Request. Loads the request, applies
+ * `decideRefundRequest`, and writes the result only while the request is
+ * still Open, so two Admins deciding at once cannot both win. Then logs the
+ * email to the learner.
+ */
+export function applyRefundDecision(
+  refundRequestId: number,
+  decision: Decision,
+  now: Date = new Date()
+): DecisionResult | { ok: false; reason: "not-found" } {
+  const request = db
+    .select({
+      status: refunds.status,
+      userId: purchases.userId,
+      courseId: purchases.courseId,
+      learnerName: users.name,
+      learnerEmail: users.email,
+      courseTitle: courses.title,
+      amountPaid: purchases.amountPaid,
+    })
+    .from(refunds)
+    .innerJoin(purchases, eq(refunds.purchaseId, purchases.id))
+    .innerJoin(users, eq(purchases.userId, users.id))
+    .innerJoin(courses, eq(purchases.courseId, courses.id))
+    .where(eq(refunds.id, refundRequestId))
+    .get();
+
+  if (!request) return { ok: false, reason: "not-found" };
+
+  const result = decideRefundRequest(request, decision, now);
+  if (!result.ok) return result;
+
+  const written = db
+    .update(refunds)
+    .set(result.fields)
+    .where(
+      and(eq(refunds.id, refundRequestId), eq(refunds.status, RefundStatus.Open))
+    )
+    .returning({ id: refunds.id })
+    .all();
+
+  if (written.length === 0) return { ok: false, reason: "already-decided" };
+
+  // Approving ends the learner's Enrollment; the row is kept, never reopened
+  // (docs/adr/0001). Lesson progress is keyed to the learner and stays.
+  if (result.fields.status === RefundStatus.Approved) {
+    db.update(enrollments)
+      .set({ endedAt: result.fields.decidedAt })
+      .where(enrolledIn(request.userId, request.courseId))
+      .run();
+  }
+
+  const email =
+    result.fields.status === RefundStatus.Approved
+      ? buildRefundApprovedEmail(request)
+      : buildRefundDeclinedEmail({
+          ...request,
+          declineReason: result.fields.declineReason ?? "",
+        });
+  console.log(`[email] to=${email.to} subject=${email.subject}\n${email.body}`);
+
+  return result;
+}
+
+/**
+ * The email a learner gets when their Refund Request is approved. There is
+ * no mail transport yet, so it goes to the server log. No date is promised:
+ * the Refund itself is not modelled (docs/adr/0002).
+ */
+function buildRefundApprovedEmail(input: {
+  learnerName: string;
+  learnerEmail: string;
+  courseTitle: string;
+  amountPaid: number;
+}) {
+  return {
+    to: input.learnerEmail,
+    subject: `Refund request approved — ${input.courseTitle}`,
+    body: [
+      `Hi ${input.learnerName},`,
+      "",
+      `An Admin has approved your refund request for "${input.courseTitle}".`,
+      `The refund of the full amount you paid, ${formatPrice(input.amountPaid)}, is on its way.`,
+      "",
+      "— The Cadence team",
+    ].join("\n"),
+  };
+}
+
+/**
+ * The email a learner gets when their Refund Request is declined. It carries
+ * the Admin's reason verbatim, and tells the learner they may ask again.
+ */
+function buildRefundDeclinedEmail(input: {
+  learnerName: string;
+  learnerEmail: string;
+  courseTitle: string;
+  declineReason: string;
+}) {
+  return {
+    to: input.learnerEmail,
+    subject: `Refund request declined — ${input.courseTitle}`,
+    body: [
+      `Hi ${input.learnerName},`,
+      "",
+      `An Admin has declined your refund request for "${input.courseTitle}".`,
+      "",
+      "The Admin's reason:",
+      input.declineReason,
+      "",
+      "You may raise a new refund request from the course page.",
+      "",
+      "— The Cadence team",
+    ].join("\n"),
+  };
+}
+
+/** Every Open Refund Request, oldest first, with what an Admin needs to decide it. */
+export function getOpenRefundRequests() {
+  return db
+    .select({
+      id: refunds.id,
+      reason: refunds.reason,
+      requestedAt: refunds.requestedAt,
+      learnerName: users.name,
+      courseTitle: courses.title,
+      amountPaid: purchases.amountPaid,
+    })
+    .from(refunds)
+    .innerJoin(purchases, eq(refunds.purchaseId, purchases.id))
+    .innerJoin(users, eq(purchases.userId, users.id))
+    .innerJoin(courses, eq(purchases.courseId, courses.id))
+    .where(eq(refunds.status, RefundStatus.Open))
+    .orderBy(refunds.requestedAt)
+    .all();
+}
+
+/**
+ * Every decided Refund Request, Approved or Declined, newest Decision first,
+ * with the Admin who made the Decision. Read-only: a Decision is final.
+ */
+export function getDecidedRefundRequests() {
+  // The users table is joined twice: once for the learner, once for the Admin.
+  const decidingAdmins = alias(users, "deciding_admins");
+
+  return db
+    .select({
+      id: refunds.id,
+      status: refunds.status,
+      decidedAt: refunds.decidedAt,
+      declineReason: refunds.declineReason,
+      learnerName: users.name,
+      courseTitle: courses.title,
+      amountPaid: purchases.amountPaid,
+      decidedByName: decidingAdmins.name,
+    })
+    .from(refunds)
+    .innerJoin(purchases, eq(refunds.purchaseId, purchases.id))
+    .innerJoin(users, eq(purchases.userId, users.id))
+    .innerJoin(courses, eq(purchases.courseId, courses.id))
+    .leftJoin(decidingAdmins, eq(refunds.decidedByUserId, decidingAdmins.id))
+    .where(
+      inArray(refunds.status, [RefundStatus.Approved, RefundStatus.Declined])
+    )
+    .orderBy(desc(refunds.decidedAt))
+    .all();
+}
+
+/**
  * Loads the facts for one learner and course and applies the refund rules.
  */
 export function getRefundEligibility(
@@ -144,6 +407,7 @@ export function getRefundEligibility(
     purchase,
     coursePrice: course.price,
     hasOpenRequest: Boolean(getOpenRefundRequest(purchase.id)),
+    hasApprovedRequest: hasApprovedRefundRequest(purchase.id),
     isClaimedTeamSeat: isClaimedTeamSeat(purchase.id),
     lessonCount: lessonIds.length,
     completedLessonCount: getCompletedLessonCount(userId, lessonIds),
@@ -161,7 +425,7 @@ export function getLatestPurchase(userId: number, courseId: number) {
     .get();
 }
 
-/** The Pending refund request on a purchase, if there is one. */
+/** The Open Refund Request on a purchase, if there is one. */
 export function getOpenRefundRequest(purchaseId: number) {
   return db
     .select()
@@ -169,10 +433,25 @@ export function getOpenRefundRequest(purchaseId: number) {
     .where(
       and(
         eq(refunds.purchaseId, purchaseId),
-        eq(refunds.status, RefundStatus.Requested)
+        eq(refunds.status, RefundStatus.Open)
       )
     )
     .get();
+}
+
+function hasApprovedRefundRequest(purchaseId: number): boolean {
+  const approved = db
+    .select({ id: refunds.id })
+    .from(refunds)
+    .where(
+      and(
+        eq(refunds.purchaseId, purchaseId),
+        eq(refunds.status, RefundStatus.Approved)
+      )
+    )
+    .get();
+
+  return Boolean(approved);
 }
 
 function isClaimedTeamSeat(purchaseId: number): boolean {

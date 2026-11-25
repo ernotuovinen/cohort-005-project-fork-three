@@ -1,5 +1,5 @@
 import { data } from "react-router";
-import { eq, and } from "drizzle-orm";
+import { eq, and, desc, isNull } from "drizzle-orm";
 import { db } from "~/db";
 import {
   UserRole,
@@ -20,25 +20,36 @@ function getCourseById(id: number) {
   return db.select().from(courses).where(eq(courses.id, id)).get();
 }
 
-function findEnrollment(userId: number, courseId: number) {
-  return db
-    .select()
-    .from(enrollments)
-    .where(
-      and(eq(enrollments.userId, userId), eq(enrollments.courseId, courseId))
-    )
-    .get();
+/**
+ * The WHERE condition for "this learner is enrolled in this course". An Ended
+ * Enrollment is treated as no enrollment (docs/adr/0001), so every enrolled
+ * check, here and in the routes, goes through this one condition.
+ */
+export function enrolledIn(userId: number, courseId: number) {
+  return and(
+    eq(enrollments.userId, userId),
+    eq(enrollments.courseId, courseId),
+    isNull(enrollments.endedAt)
+  );
 }
 
-function isUserEnrolled(userId: number, courseId: number) {
+/** The learner's Enrollment in the course that still grants access, if any. */
+export function findEnrollment(userId: number, courseId: number) {
+  return db.select().from(enrollments).where(enrolledIn(userId, courseId)).get();
+}
+
+export function isUserEnrolled(userId: number, courseId: number) {
   return !!findEnrollment(userId, courseId);
 }
 
+// A learner who bought again after an approved Refund Request has more than
+// one purchase; the latest one is the one behind their current Enrollment.
 function findPurchase(userId: number, courseId: number) {
   return db
     .select()
     .from(purchases)
     .where(and(eq(purchases.userId, userId), eq(purchases.courseId, courseId)))
+    .orderBy(desc(purchases.createdAt))
     .get();
 }
 

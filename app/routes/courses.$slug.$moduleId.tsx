@@ -2,10 +2,10 @@ import { Link } from "react-router";
 import type { Route } from "./+types/courses.$slug.$moduleId";
 import { getCurrentUserId } from "~/lib/session";
 import { db } from "~/db";
+import { isUserEnrolled } from "~/lib/access.server";
 import {
   categories,
   courses,
-  enrollments,
   lessonProgress,
   lessons,
   modules,
@@ -109,18 +109,6 @@ function getModuleWithLessons(id: number) {
     .all();
 
   return { ...mod, lessons: moduleLessons };
-}
-
-function isUserEnrolled(userId: number, courseId: number) {
-  const existing = db
-    .select()
-    .from(enrollments)
-    .where(
-      and(eq(enrollments.userId, userId), eq(enrollments.courseId, courseId))
-    )
-    .get();
-
-  return !!existing;
 }
 
 function getLessonProgressForCourse(userId: number, courseId: number) {
