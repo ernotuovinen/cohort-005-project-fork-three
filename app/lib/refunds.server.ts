@@ -2,16 +2,19 @@ import { and, eq, inArray, isNotNull, sql } from "drizzle-orm";
 import { db } from "~/db";
 import {
   coupons,
+  courses,
   lessonProgress,
   lessons,
   modules,
   purchases,
   refunds,
+  users,
   videoWatchEvents,
   LessonProgressStatus,
   RefundStatus,
 } from "~/db/schema";
 import { getDiscountForCountry } from "~/lib/ppp";
+import { formatPrice } from "~/lib/utils";
 
 // The rules for a Refund Request (see GLOSSARY.md). Both the course page, which
 // decides whether to offer a refund, and the refund action, which accepts the
@@ -124,6 +127,147 @@ export function evaluateRefundEligibility(facts: RefundFacts): RefundEligibility
     purchaseId: purchase.id,
     offer: { amount, lastDayInWindow },
   };
+}
+
+/**
+ * An Admin's Decision on an Open Refund Request (see GLOSSARY.md). Each
+ * outcome is its own variant, so a Decline carrying its reason can sit next
+ * to Approve without changing it.
+ */
+export type Decision = { outcome: "approve"; decidedByUserId: number };
+
+export type DecisionRefusalReason = "already-decided";
+
+/** What a Decision writes onto the Refund Request. */
+export type DecisionFields = {
+  status: RefundStatus;
+  decidedAt: string;
+  decidedByUserId: number;
+  declineReason: string | null;
+};
+
+export type DecisionResult =
+  | { ok: true; fields: DecisionFields }
+  | { ok: false; reason: DecisionRefusalReason };
+
+/**
+ * Applies a Decision to a Refund Request's current state. Pure: it receives
+ * the clock, and returns the fields to write or why the Decision is refused.
+ * Eligibility is not judged again here; it belongs to the moment the learner
+ * asked (docs/adr/0002).
+ */
+export function decideRefundRequest(
+  request: { status: RefundStatus },
+  decision: Decision,
+  now: Date
+): DecisionResult {
+  // A Decision is final: only an Open Refund Request can be decided.
+  if (request.status !== RefundStatus.Open) {
+    return { ok: false, reason: "already-decided" };
+  }
+
+  return {
+    ok: true,
+    fields: {
+      status: RefundStatus.Approved,
+      decidedAt: now.toISOString(),
+      decidedByUserId: decision.decidedByUserId,
+      declineReason: null,
+    },
+  };
+}
+
+/**
+ * Records an Admin's Decision on a Refund Request. Loads the request, applies
+ * `decideRefundRequest`, and writes the result only while the request is
+ * still Open, so two Admins deciding at once cannot both win. Then logs the
+ * email to the learner.
+ */
+export function applyRefundDecision(
+  refundRequestId: number,
+  decision: Decision,
+  now: Date = new Date()
+): DecisionResult | { ok: false; reason: "not-found" } {
+  const request = db
+    .select({
+      status: refunds.status,
+      learnerName: users.name,
+      learnerEmail: users.email,
+      courseTitle: courses.title,
+      amountPaid: purchases.amountPaid,
+    })
+    .from(refunds)
+    .innerJoin(purchases, eq(refunds.purchaseId, purchases.id))
+    .innerJoin(users, eq(purchases.userId, users.id))
+    .innerJoin(courses, eq(purchases.courseId, courses.id))
+    .where(eq(refunds.id, refundRequestId))
+    .get();
+
+  if (!request) return { ok: false, reason: "not-found" };
+
+  const result = decideRefundRequest(request, decision, now);
+  if (!result.ok) return result;
+
+  const written = db
+    .update(refunds)
+    .set(result.fields)
+    .where(
+      and(eq(refunds.id, refundRequestId), eq(refunds.status, RefundStatus.Open))
+    )
+    .returning({ id: refunds.id })
+    .all();
+
+  if (written.length === 0) return { ok: false, reason: "already-decided" };
+
+  const email = buildRefundApprovedEmail(request);
+  console.log(`[email] to=${email.to} subject=${email.subject}\n${email.body}`);
+
+  return result;
+}
+
+/**
+ * The email a learner gets when their Refund Request is approved. There is
+ * no mail transport yet, so it goes to the server log. No date is promised:
+ * the Refund itself is not modelled (docs/adr/0002).
+ */
+function buildRefundApprovedEmail(input: {
+  learnerName: string;
+  learnerEmail: string;
+  courseTitle: string;
+  amountPaid: number;
+}) {
+  return {
+    to: input.learnerEmail,
+    subject: `Refund request approved — ${input.courseTitle}`,
+    body: [
+      `Hi ${input.learnerName},`,
+      "",
+      `An Admin has approved your refund request for "${input.courseTitle}".`,
+      `The refund of the full amount you paid, ${formatPrice(input.amountPaid)}, is on its way.`,
+      "",
+      "— The Cadence team",
+    ].join("\n"),
+  };
+}
+
+/** Every Open Refund Request, oldest first, with what an Admin needs to decide it. */
+export function getOpenRefundRequests() {
+  return db
+    .select({
+      id: refunds.id,
+      reason: refunds.reason,
+      requestedAt: refunds.requestedAt,
+      learnerName: users.name,
+      courseTitle: courses.title,
+      amountPaid: purchases.amountPaid,
+    })
+    .from(refunds)
+    .innerJoin(purchases, eq(refunds.purchaseId, purchases.id))
+    .innerJoin(users, eq(purchases.userId, users.id))
+    .innerJoin(courses, eq(purchases.courseId, courses.id))
+    .where(eq(refunds.status, RefundStatus.Open))
+    .orderBy(refunds.requestedAt)
+    .all();
 }
 
 /**

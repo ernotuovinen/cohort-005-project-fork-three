@@ -1,5 +1,7 @@
 import { describe, it, expect } from "vitest";
+import { RefundStatus } from "~/db/schema";
 import {
+  decideRefundRequest,
   evaluateRefundEligibility,
   lastDayOfRefundWindow,
   REFUND_WATCH_LIMIT_SECONDS,
@@ -115,4 +117,33 @@ describe("lastDayOfRefundWindow", () => {
       "2026-01-24"
     );
   });
+});
+
+describe("decideRefundRequest", () => {
+  const now = new Date(2026, 0, 15, 9, 30);
+  const approveByAdmin = { outcome: "approve", decidedByUserId: 7 } as const;
+
+  it("approves an Open Refund Request, recording who decided and when", () => {
+    expect(
+      decideRefundRequest({ status: RefundStatus.Open }, approveByAdmin, now)
+    ).toEqual({
+      ok: true,
+      fields: {
+        status: RefundStatus.Approved,
+        decidedAt: now.toISOString(),
+        decidedByUserId: 7,
+        declineReason: null,
+      },
+    });
+  });
+
+  it.each([RefundStatus.Approved, RefundStatus.Declined])(
+    "refuses a Decision on a Refund Request already %s",
+    (status) => {
+      expect(decideRefundRequest({ status }, approveByAdmin, now)).toEqual({
+        ok: false,
+        reason: "already-decided",
+      });
+    }
+  );
 });
