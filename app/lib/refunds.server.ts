@@ -135,9 +135,17 @@ export function evaluateRefundEligibility(facts: RefundFacts): RefundEligibility
  * outcome is its own variant, so a Decline carrying its reason can sit next
  * to Approve without changing it.
  */
-export type Decision = { outcome: "approve"; decidedByUserId: number };
+export type Decision =
+  | { outcome: "approve"; decidedByUserId: number }
+  | { outcome: "decline"; decidedByUserId: number; reason: string };
 
-export type DecisionRefusalReason = "already-decided";
+/** The longest decline reason an Admin may give, in characters after trimming. */
+export const DECLINE_REASON_MAX_LENGTH = 500;
+
+export type DecisionRefusalReason =
+  | "already-decided"
+  | "decline-reason-missing"
+  | "decline-reason-too-long";
 
 /** What a Decision writes onto the Refund Request. */
 export type DecisionFields = {
@@ -167,11 +175,35 @@ export function decideRefundRequest(
     return { ok: false, reason: "already-decided" };
   }
 
+  const decidedAt = now.toISOString();
+
+  if (decision.outcome === "decline") {
+    const reason = decision.reason.trim();
+
+    // A learner never receives a bare refusal.
+    if (reason === "") {
+      return { ok: false, reason: "decline-reason-missing" };
+    }
+    if (reason.length > DECLINE_REASON_MAX_LENGTH) {
+      return { ok: false, reason: "decline-reason-too-long" };
+    }
+
+    return {
+      ok: true,
+      fields: {
+        status: RefundStatus.Declined,
+        decidedAt,
+        decidedByUserId: decision.decidedByUserId,
+        declineReason: reason,
+      },
+    };
+  }
+
   return {
     ok: true,
     fields: {
       status: RefundStatus.Approved,
-      decidedAt: now.toISOString(),
+      decidedAt,
       decidedByUserId: decision.decidedByUserId,
       declineReason: null,
     },
@@ -237,7 +269,13 @@ export function applyRefundDecision(
       .run();
   }
 
-  const email = buildRefundApprovedEmail(request);
+  const email =
+    result.fields.status === RefundStatus.Approved
+      ? buildRefundApprovedEmail(request)
+      : buildRefundDeclinedEmail({
+          ...request,
+          declineReason: result.fields.declineReason ?? "",
+        });
   console.log(`[email] to=${email.to} subject=${email.subject}\n${email.body}`);
 
   return result;
@@ -262,6 +300,34 @@ function buildRefundApprovedEmail(input: {
       "",
       `An Admin has approved your refund request for "${input.courseTitle}".`,
       `The refund of the full amount you paid, ${formatPrice(input.amountPaid)}, is on its way.`,
+      "",
+      "— The Cadence team",
+    ].join("\n"),
+  };
+}
+
+/**
+ * The email a learner gets when their Refund Request is declined. It carries
+ * the Admin's reason verbatim, and tells the learner they may ask again.
+ */
+function buildRefundDeclinedEmail(input: {
+  learnerName: string;
+  learnerEmail: string;
+  courseTitle: string;
+  declineReason: string;
+}) {
+  return {
+    to: input.learnerEmail,
+    subject: `Refund request declined — ${input.courseTitle}`,
+    body: [
+      `Hi ${input.learnerName},`,
+      "",
+      `An Admin has declined your refund request for "${input.courseTitle}".`,
+      "",
+      "The Admin's reason:",
+      input.declineReason,
+      "",
+      "You may raise a new refund request from the course page.",
       "",
       "— The Cadence team",
     ].join("\n"),

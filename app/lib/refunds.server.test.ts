@@ -137,6 +137,75 @@ describe("decideRefundRequest", () => {
     });
   });
 
+  it("declines an Open Refund Request, keeping the Admin's reason", () => {
+    expect(
+      decideRefundRequest(
+        { status: RefundStatus.Open },
+        { outcome: "decline", decidedByUserId: 7, reason: "Most of the course was watched." },
+        now
+      )
+    ).toEqual({
+      ok: true,
+      fields: {
+        status: RefundStatus.Declined,
+        decidedAt: now.toISOString(),
+        decidedByUserId: 7,
+        declineReason: "Most of the course was watched.",
+      },
+    });
+  });
+
+  it.each(["", "   ", "\n\t "])(
+    "refuses a Decline whose reason is blank (%j)",
+    (reason) => {
+      expect(
+        decideRefundRequest(
+          { status: RefundStatus.Open },
+          { outcome: "decline", decidedByUserId: 7, reason },
+          now
+        )
+      ).toEqual({ ok: false, reason: "decline-reason-missing" });
+    }
+  );
+
+  it("refuses a Decline whose reason is 501 characters", () => {
+    expect(
+      decideRefundRequest(
+        { status: RefundStatus.Open },
+        { outcome: "decline", decidedByUserId: 7, reason: "a".repeat(501) },
+        now
+      )
+    ).toEqual({ ok: false, reason: "decline-reason-too-long" });
+  });
+
+  it("accepts a Decline whose reason is exactly 500 characters", () => {
+    const result = decideRefundRequest(
+      { status: RefundStatus.Open },
+      { outcome: "decline", decidedByUserId: 7, reason: "a".repeat(500) },
+      now
+    );
+    expect(result).toMatchObject({
+      ok: true,
+      fields: { status: RefundStatus.Declined, declineReason: "a".repeat(500) },
+    });
+  });
+
+  it("trims the reason before the length check and keeps the trimmed reason", () => {
+    const result = decideRefundRequest(
+      { status: RefundStatus.Open },
+      {
+        outcome: "decline",
+        decidedByUserId: 7,
+        reason: `   ${"a".repeat(500)}  \n`,
+      },
+      now
+    );
+    expect(result).toMatchObject({
+      ok: true,
+      fields: { status: RefundStatus.Declined, declineReason: "a".repeat(500) },
+    });
+  });
+
   it.each([RefundStatus.Approved, RefundStatus.Declined])(
     "refuses a Decision on a Refund Request already %s",
     (status) => {
@@ -146,4 +215,14 @@ describe("decideRefundRequest", () => {
       });
     }
   );
+
+  it("refuses a Decline on a decided Refund Request as already decided, before checking its reason", () => {
+    expect(
+      decideRefundRequest(
+        { status: RefundStatus.Declined },
+        { outcome: "decline", decidedByUserId: 7, reason: "  " },
+        now
+      )
+    ).toEqual({ ok: false, reason: "already-decided" });
+  });
 });

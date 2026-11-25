@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import {
   data,
   isRouteErrorResponse,
@@ -18,15 +18,24 @@ import { parseFormData } from "~/lib/validation";
 import { formatPrice } from "~/lib/utils";
 import {
   applyRefundDecision,
+  DECLINE_REASON_MAX_LENGTH,
   getOpenRefundRequests,
+  type Decision,
 } from "~/lib/refunds.server";
 import { Card, CardContent } from "~/components/ui/card";
 import { Button } from "~/components/ui/button";
+import { Textarea } from "~/components/ui/textarea";
 
 const refundRequestActionSchema = z.discriminatedUnion("intent", [
   z.object({
     intent: z.literal("approve"),
     refundRequestId: z.coerce.number().int(),
+  }),
+  z.object({
+    intent: z.literal("decline"),
+    refundRequestId: z.coerce.number().int(),
+    // The Decision rule checks the reason; it is not repeated here.
+    reason: z.string(),
   }),
 ]);
 
@@ -64,7 +73,10 @@ export async function loader({ request }: Route.LoaderArgs) {
     "Select a user from the DevUI panel to decide Refund Requests."
   );
 
-  return { openRequests: getOpenRefundRequests() };
+  return {
+    openRequests: getOpenRefundRequests(),
+    declineReasonMaxLength: DECLINE_REASON_MAX_LENGTH,
+  };
 }
 
 export async function action({ request }: Route.ActionArgs) {
@@ -80,15 +92,38 @@ export async function action({ request }: Route.ActionArgs) {
     );
   }
 
-  const { refundRequestId } = parsed.data;
-  const result = applyRefundDecision(refundRequestId, {
-    outcome: "approve",
-    decidedByUserId: admin.id,
-  });
+  const decision: Decision =
+    parsed.data.intent === "decline"
+      ? {
+          outcome: "decline",
+          decidedByUserId: admin.id,
+          reason: parsed.data.reason,
+        }
+      : { outcome: "approve", decidedByUserId: admin.id };
+
+  const result = applyRefundDecision(parsed.data.refundRequestId, decision);
 
   if (!result.ok) {
     if (result.reason === "not-found") {
       return data({ error: "Refund Request not found." }, { status: 404 });
+    }
+    if (result.reason === "decline-reason-missing") {
+      return data(
+        {
+          error: "Give a reason for the Decline. The learner will read it.",
+          field: "reason" as const,
+        },
+        { status: 400 }
+      );
+    }
+    if (result.reason === "decline-reason-too-long") {
+      return data(
+        {
+          error: `Keep the reason for the Decline to ${DECLINE_REASON_MAX_LENGTH} characters or fewer.`,
+          field: "reason" as const,
+        },
+        { status: 400 }
+      );
     }
     return data(
       {
@@ -99,7 +134,7 @@ export async function action({ request }: Route.ActionArgs) {
     );
   }
 
-  return { success: true as const };
+  return { success: true as const, outcome: decision.outcome };
 }
 
 // A refused Decision answers 409, and React Router skips revalidation after
@@ -122,7 +157,9 @@ function formatRaisedDate(iso: string) {
 
 function OpenRefundRequestRow({
   refundRequest,
+  declineReasonMaxLength,
 }: {
+  declineReasonMaxLength: number;
   refundRequest: {
     id: number;
     learnerName: string;
@@ -134,6 +171,14 @@ function OpenRefundRequestRow({
 }) {
   const fetcher = useFetcher<typeof action>();
   const isSubmitting = fetcher.state !== "idle";
+  const submittingIntent = fetcher.formData?.get("intent");
+  const [isDeclining, setIsDeclining] = useState(false);
+
+  // A refused reason is shown next to the field, so it is not toasted.
+  const reasonError =
+    fetcher.data && "error" in fetcher.data && "field" in fetcher.data
+      ? fetcher.data.error
+      : null;
 
   // Toast as soon as the action answers. Waiting for "idle" is too late: the
   // revalidation that follows removes this row, decided or not.
@@ -141,9 +186,11 @@ function OpenRefundRequestRow({
     if (!fetcher.data) return;
     if ("success" in fetcher.data) {
       toast.success(
-        `Refund Request approved for ${refundRequest.learnerName}.`
+        fetcher.data.outcome === "decline"
+          ? `Refund Request declined for ${refundRequest.learnerName}.`
+          : `Refund Request approved for ${refundRequest.learnerName}.`
       );
-    } else if ("error" in fetcher.data) {
+    } else if ("error" in fetcher.data && !("field" in fetcher.data)) {
       toast.error(fetcher.data.error);
     }
   }, [fetcher.data, refundRequest.learnerName]);
@@ -164,22 +211,96 @@ function OpenRefundRequestRow({
         {formatRaisedDate(refundRequest.requestedAt)}
       </td>
       <td className="px-4 py-3">
-        <fetcher.Form method="post">
-          <input type="hidden" name="intent" value="approve" />
-          <input
-            type="hidden"
-            name="refundRequestId"
-            value={refundRequest.id}
-          />
-          <Button
-            type="submit"
-            size="sm"
-            className="h-8 text-xs"
-            disabled={isSubmitting}
-          >
-            {isSubmitting ? "Approving…" : "Approve"}
-          </Button>
-        </fetcher.Form>
+        {isDeclining ? (
+          <fetcher.Form method="post" className="w-72 space-y-2">
+            <input type="hidden" name="intent" value="decline" />
+            <input
+              type="hidden"
+              name="refundRequestId"
+              value={refundRequest.id}
+            />
+            <label
+              htmlFor={`decline-reason-${refundRequest.id}`}
+              className="text-xs font-medium"
+            >
+              Reason for the Decline
+            </label>
+            <Textarea
+              id={`decline-reason-${refundRequest.id}`}
+              name="reason"
+              rows={3}
+              maxLength={declineReasonMaxLength}
+              autoFocus
+              aria-invalid={reasonError ? true : undefined}
+              aria-describedby={
+                reasonError ? `decline-error-${refundRequest.id}` : undefined
+              }
+              placeholder="The learner will read this."
+              className="text-sm"
+            />
+            {reasonError && (
+              <p
+                id={`decline-error-${refundRequest.id}`}
+                role="alert"
+                className="text-xs text-destructive"
+              >
+                {reasonError}
+              </p>
+            )}
+            <div className="flex gap-2">
+              <Button
+                type="submit"
+                size="sm"
+                variant="destructive"
+                className="h-8 text-xs"
+                disabled={isSubmitting}
+              >
+                {isSubmitting ? "Declining…" : "Decline Refund Request"}
+              </Button>
+              <Button
+                type="button"
+                size="sm"
+                variant="ghost"
+                className="h-8 text-xs"
+                disabled={isSubmitting}
+                onClick={() => setIsDeclining(false)}
+              >
+                Cancel
+              </Button>
+            </div>
+          </fetcher.Form>
+        ) : (
+          <div className="flex gap-2">
+            <fetcher.Form method="post">
+              <input type="hidden" name="intent" value="approve" />
+              <input
+                type="hidden"
+                name="refundRequestId"
+                value={refundRequest.id}
+              />
+              <Button
+                type="submit"
+                size="sm"
+                className="h-8 text-xs"
+                disabled={isSubmitting}
+              >
+                {isSubmitting && submittingIntent === "approve"
+                  ? "Approving…"
+                  : "Approve"}
+              </Button>
+            </fetcher.Form>
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              className="h-8 text-xs"
+              disabled={isSubmitting}
+              onClick={() => setIsDeclining(true)}
+            >
+              Decline
+            </Button>
+          </div>
+        )}
       </td>
     </tr>
   );
@@ -191,7 +312,7 @@ const headerCell =
 export default function AdminRefundRequests({
   loaderData,
 }: Route.ComponentProps) {
-  const { openRequests } = loaderData;
+  const { openRequests, declineReasonMaxLength } = loaderData;
 
   return (
     <div className="mx-auto max-w-7xl p-6 lg:p-8">
@@ -248,6 +369,7 @@ export default function AdminRefundRequests({
                     <OpenRefundRequestRow
                       key={refundRequest.id}
                       refundRequest={refundRequest}
+                      declineReasonMaxLength={declineReasonMaxLength}
                     />
                   ))}
                 </tbody>
