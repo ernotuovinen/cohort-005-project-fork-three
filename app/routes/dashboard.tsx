@@ -9,7 +9,7 @@ import {
   lessonProgress,
   LessonProgressStatus,
 } from "~/db/schema";
-import { eq, and, or, sql } from "drizzle-orm";
+import { eq, and, or, sql, isNull } from "drizzle-orm";
 import { getCurrentUserId } from "~/lib/session";
 import { Card, CardContent, CardFooter, CardHeader } from "~/components/ui/card";
 import { Button } from "~/components/ui/button";
@@ -32,7 +32,8 @@ function getUserEnrolledCourses(userId: number) {
     })
     .from(enrollments)
     .innerJoin(courses, eq(enrollments.courseId, courses.id))
-    .where(eq(enrollments.userId, userId))
+    // Ended Enrollments grant no access, so they are not "my courses".
+    .where(and(eq(enrollments.userId, userId), isNull(enrollments.endedAt)))
     .all();
 }
 

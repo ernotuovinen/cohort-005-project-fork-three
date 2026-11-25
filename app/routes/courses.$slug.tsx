@@ -5,13 +5,13 @@ import { z } from "zod";
 import type { Route } from "./+types/courses.$slug";
 import { getCurrentUserId } from "~/lib/session";
 import { db } from "~/db";
+import { isUserEnrolled } from "~/lib/access.server";
 import {
   courses,
   categories,
   users,
   modules,
   lessons,
-  enrollments,
   lessonProgress,
   courseRatings,
   LessonProgressStatus,
@@ -131,17 +131,6 @@ function getLessonCountForCourse(courseId: number) {
     .get();
 
   return count?.count ?? 0;
-}
-
-function isUserEnrolled(userId: number, courseId: number) {
-  const enrollment = db
-    .select()
-    .from(enrollments)
-    .where(
-      and(eq(enrollments.userId, userId), eq(enrollments.courseId, courseId))
-    )
-    .get();
-  return !!enrollment;
 }
 
 function getCourseLessonIds(courseId: number): number[] {

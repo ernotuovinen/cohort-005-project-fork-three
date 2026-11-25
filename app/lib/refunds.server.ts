@@ -1,8 +1,9 @@
-import { and, eq, inArray, isNotNull, sql } from "drizzle-orm";
+import { and, eq, inArray, isNotNull, isNull, sql } from "drizzle-orm";
 import { db } from "~/db";
 import {
   coupons,
   courses,
+  enrollments,
   lessonProgress,
   lessons,
   modules,
@@ -191,6 +192,8 @@ export function applyRefundDecision(
   const request = db
     .select({
       status: refunds.status,
+      userId: purchases.userId,
+      courseId: purchases.courseId,
       learnerName: users.name,
       learnerEmail: users.email,
       courseTitle: courses.title,
@@ -218,6 +221,21 @@ export function applyRefundDecision(
     .all();
 
   if (written.length === 0) return { ok: false, reason: "already-decided" };
+
+  // Approving ends the learner's Enrollment; the row is kept, never reopened
+  // (docs/adr/0001). Lesson progress is keyed to the learner and stays.
+  if (result.fields.status === RefundStatus.Approved) {
+    db.update(enrollments)
+      .set({ endedAt: result.fields.decidedAt })
+      .where(
+        and(
+          eq(enrollments.userId, request.userId),
+          eq(enrollments.courseId, request.courseId),
+          isNull(enrollments.endedAt)
+        )
+      )
+      .run();
+  }
 
   const email = buildRefundApprovedEmail(request);
   console.log(`[email] to=${email.to} subject=${email.subject}\n${email.body}`);

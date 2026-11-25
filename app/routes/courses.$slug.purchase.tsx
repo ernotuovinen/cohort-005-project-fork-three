@@ -5,6 +5,7 @@ import { z } from "zod";
 import type { Route } from "./+types/courses.$slug.purchase";
 import { getCurrentUserId } from "~/lib/session";
 import { db } from "~/db";
+import { findEnrollment, isUserEnrolled } from "~/lib/access.server";
 import {
   courses,
   categories,
@@ -116,20 +117,6 @@ function getLessonCountForCourse(courseId: number) {
     .get();
 
   return count?.count ?? 0;
-}
-
-function findEnrollment(userId: number, courseId: number) {
-  return db
-    .select()
-    .from(enrollments)
-    .where(
-      and(eq(enrollments.userId, userId), eq(enrollments.courseId, courseId))
-    )
-    .get();
-}
-
-function isUserEnrolled(userId: number, courseId: number) {
-  return !!findEnrollment(userId, courseId);
 }
 
 function getEnrollmentCountForCourse(courseId: number) {
