@@ -20,6 +20,7 @@ function facts(overrides: Partial<RefundFacts> = {}): RefundFacts {
     },
     coursePrice: 7900,
     hasOpenRequest: false,
+    hasApprovedRequest: false,
     isClaimedTeamSeat: false,
     lessonCount: 10,
     completedLessonCount: 0,
@@ -50,6 +51,12 @@ describe("evaluateRefundEligibility", () => {
     expect(
       evaluateRefundEligibility(facts({ hasOpenRequest: true }))
     ).toEqual({ eligible: false, reason: "request-already-open" });
+  });
+
+  it("refuses when the purchase was already refunded", () => {
+    expect(
+      evaluateRefundEligibility(facts({ hasApprovedRequest: true }))
+    ).toEqual({ eligible: false, reason: "already-refunded" });
   });
 
   it("refuses a claimed team seat", () => {

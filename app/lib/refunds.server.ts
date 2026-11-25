@@ -1,4 +1,4 @@
-import { and, desc, eq, inArray, isNotNull, isNull, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, isNotNull, sql } from "drizzle-orm";
 import { alias } from "drizzle-orm/sqlite-core";
 import { db } from "~/db";
 import {
@@ -16,6 +16,7 @@ import {
   RefundStatus,
 } from "~/db/schema";
 import { getDiscountForCountry } from "~/lib/ppp";
+import { enrolledIn } from "~/lib/access.server";
 import { formatPrice } from "~/lib/utils";
 
 // The rules for a Refund Request (see GLOSSARY.md). Both the course page, which
@@ -34,6 +35,7 @@ export const REFUND_COMPLETION_LIMIT = 0.5;
 export type RefundIneligibilityReason =
   | "no-purchase"
   | "request-already-open"
+  | "already-refunded"
   | "claimed-team-seat"
   | "window-closed"
   | "too-much-completed"
@@ -61,6 +63,8 @@ export type RefundFacts = {
     | undefined;
   coursePrice: number;
   hasOpenRequest: boolean;
+  /** The purchase already has an Approved Refund Request. */
+  hasApprovedRequest: boolean;
   isClaimedTeamSeat: boolean;
   lessonCount: number;
   completedLessonCount: number;
@@ -92,6 +96,11 @@ export function evaluateRefundEligibility(facts: RefundFacts): RefundEligibility
   if (!purchase) return { eligible: false, reason: "no-purchase" };
   if (facts.hasOpenRequest) {
     return { eligible: false, reason: "request-already-open" };
+  }
+  // A Declined Refund Request lets the learner ask again; an Approved one
+  // does not, because the purchase is already refunded (see GLOSSARY.md).
+  if (facts.hasApprovedRequest) {
+    return { eligible: false, reason: "already-refunded" };
   }
 
   // A seat that came out of a team licence, and has been claimed, belongs to
@@ -260,13 +269,7 @@ export function applyRefundDecision(
   if (result.fields.status === RefundStatus.Approved) {
     db.update(enrollments)
       .set({ endedAt: result.fields.decidedAt })
-      .where(
-        and(
-          eq(enrollments.userId, request.userId),
-          eq(enrollments.courseId, request.courseId),
-          isNull(enrollments.endedAt)
-        )
-      )
+      .where(enrolledIn(request.userId, request.courseId))
       .run();
   }
 
@@ -404,6 +407,7 @@ export function getRefundEligibility(
     purchase,
     coursePrice: course.price,
     hasOpenRequest: Boolean(getOpenRefundRequest(purchase.id)),
+    hasApprovedRequest: hasApprovedRefundRequest(purchase.id),
     isClaimedTeamSeat: isClaimedTeamSeat(purchase.id),
     lessonCount: lessonIds.length,
     completedLessonCount: getCompletedLessonCount(userId, lessonIds),
@@ -433,6 +437,21 @@ export function getOpenRefundRequest(purchaseId: number) {
       )
     )
     .get();
+}
+
+function hasApprovedRefundRequest(purchaseId: number): boolean {
+  const approved = db
+    .select({ id: refunds.id })
+    .from(refunds)
+    .where(
+      and(
+        eq(refunds.purchaseId, purchaseId),
+        eq(refunds.status, RefundStatus.Approved)
+      )
+    )
+    .get();
+
+  return Boolean(approved);
 }
 
 function isClaimedTeamSeat(purchaseId: number): boolean {

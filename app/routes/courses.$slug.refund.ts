@@ -48,7 +48,7 @@ function buildRefundRequestEmail(input: {
       `We have your refund request for "${input.courseTitle}".`,
       `The refund is for ${formatPrice(input.amount)}.`,
       "",
-      "An Admin reviews every refund request by hand and makes a decision. You do not need to do anything else — we will email you again when it is decided.",
+      "An Admin reads every refund request by hand and decides it. You do not need to do anything else — we will email you again when it is decided.",
       "",
       "— The Cadence team",
     ].join("\n"),
@@ -66,6 +66,10 @@ const ineligibilityResponses: Record<
   "no-purchase": { message: "You have not bought this course.", status: 403 },
   "request-already-open": {
     message: "You already have a refund request open on this purchase.",
+    status: 409,
+  },
+  "already-refunded": {
+    message: "This purchase has already been refunded.",
     status: 409,
   },
   "claimed-team-seat": {

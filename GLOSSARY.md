@@ -38,7 +38,7 @@ _Avoid_: Pending, Requested, Awaiting review, Unresolved
 
 **Decision**:
 What an Admin does to an Open Refund Request. There are two outcomes, Approve and Decline, and a decision is final.
-_Avoid_: Resolution, review, verdict, outcome
+_Avoid_: Resolution, review, verdict
 
 **Approved Refund Request**:
 A refund request an Admin has approved. Approving ends the learner's enrollment and leads to a Refund.
